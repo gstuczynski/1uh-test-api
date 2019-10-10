@@ -1,0 +1,199 @@
+// utilities to interface with the 1uphealth api servers side
+const request = require("request");
+const async = require("async");
+const ONEUP_DEMOWEBAPPLOCAL_CLIENTID =
+  process.env.ONEUP_DEMOWEBAPPLOCAL_CLIENTID;
+const ONEUP_DEMOWEBAPPLOCAL_CLIENTSECRET =
+  process.env.ONEUP_DEMOWEBAPPLOCAL_CLIENTSECRET;
+let accessTokenCache = {};
+const ROOT_API_URL = `https://api.1up.health`;
+const USER_API_URL = `https://api.1up.health`;
+const FHIR_API_URL = `https://api.1up.health/fhir`;
+
+function getTokenFromAuthCode(code, callback) {
+  var postUrl = `${ROOT_API_URL}/fhir/oauth2/token?client_id=${ONEUP_DEMOWEBAPPLOCAL_CLIENTID}&client_secret=${ONEUP_DEMOWEBAPPLOCAL_CLIENTSECRET}&code=${code}&grant_type=authorization_code`;
+
+  request.post(postUrl, function(error, response, body) {
+    if (error) {
+      console.log("error", error);
+    }
+    try {
+      console.log("body", response.statusCode, body, "----");
+      var jsbody = JSON.parse(body);
+      console.log("createOneUpUser", body);
+      // never send the body.refrsh_token client side
+      // this access token must be refreshed after 2 hours
+      callback(jsbody.access_token);
+    } catch (error) {
+      // the auth code may take a second to register, so we can try again
+      console.log("error parsing getTokenFromAuthCode", body, error);
+    }
+  });
+}
+
+// get the Auth code for existing user
+function getAuthCodeForExistingUser(email, callback) {
+  request.post(
+    {
+      url: `${ROOT_API_URL}/user-management/v1/user/auth-code?app_user_id=${email}&client_id=${ONEUP_DEMOWEBAPPLOCAL_CLIENTID}&client_secret=${ONEUP_DEMOWEBAPPLOCAL_CLIENTSECRET}`
+    },
+    (error, response, body) => {
+      let jsbody = JSON.parse(body);
+      let oneupUserId = jsbody.oneup_user_id;
+
+      getTokenFromAuthCode(jsbody.code, function(access_token) {
+        accessTokenCache[email] = access_token;
+        callback(oneupUserId);
+      });
+    }
+  );
+}
+
+// create new 1uphealth user
+const createOneUpUser = async email => {
+  let url = `${USER_API_URL}/user-management/v1/user?app_user_id=${email}&client_id=${ONEUP_DEMOWEBAPPLOCAL_CLIENTID}&client_secret=${ONEUP_DEMOWEBAPPLOCAL_CLIENTSECRET}`;
+  request.post(url, function(error, response, body) {
+    if (error) {
+      console.log("Error POSTing to 1up user-management: ", error);
+    } else {
+      console.log("body", response.statusCode, body, "----", url);
+      let jsbody = JSON.parse(body);
+      let oneupUserId = jsbody.oneup_user_id;
+      if (jsbody.error === "this user already exists") {
+        getAuthCodeForExistingUser(email, () => {});
+      } else {
+        getTokenFromAuthCode(jsbody.code, function(access_token) {
+          accessTokenCache[email] = access_token;
+          return oneupUserId;
+        });
+      }
+    }
+  });
+};
+
+// check for 1upehealth user
+const getOneUpUserId = async email => {
+  let getUrl = `${USER_API_URL}/user-management/v1/user?client_id=${ONEUP_DEMOWEBAPPLOCAL_CLIENTID}&client_secret=${ONEUP_DEMOWEBAPPLOCAL_CLIENTSECRET}&app_user_id=${email}`;
+  await request.get(getUrl, function(error, response, body) {
+    let jsbody = JSON.parse(body);
+    return jsbody.oneup_user_id;
+  });
+};
+
+// gets the 1uphealth user id from the user email address
+const getOrMakeOneUpUserId = async email => {
+  if (!ONEUP_DEMOWEBAPPLOCAL_CLIENTID || !ONEUP_DEMOWEBAPPLOCAL_CLIENTSECRET) {
+    throw "no clientId or clientSecret provided";
+  }
+  await getOneUpUserId(email).then(oneupUserId => {
+    if (
+      typeof oneupUserId === "undefined" ||
+      typeof accessTokenCache[email] === "undefined"
+    ) {
+      createOneUpUser(email, function(_oneupUserId) {
+        oneupUserId = _oneupUserId;
+        console.log("createOneUpUser oneupUserId", oneupUserId);
+      });
+    } else {
+      console.log("getOneUpUserId oneupUserId", oneupUserId);
+    }
+    return oneupUserId;
+  });
+};
+
+// gets a fhir resource list for a user
+function getFhirResourceBundle(
+  apiVersion,
+  resourceType,
+  oneupAccessToken,
+  callback
+) {
+  let url = `${FHIR_API_URL}/${apiVersion}/${resourceType}`;
+  let options = {
+    url: url,
+    headers: {
+      Authorization: `Bearer ${oneupAccessToken}`
+    }
+  };
+  request.get(options, function(error, response, body) {
+    console.log("error", error);
+    console.log("url", url);
+    console.log("body", body);
+    if (error) {
+    } else {
+      console.log("body", response.statusCode, body, "----", url);
+      try {
+        let jsbody = JSON.parse(body);
+      } catch (e) {
+        console.log("error***********", new Date(), url, options);
+      }
+    }
+    callback(error, body);
+  });
+}
+
+let endpointsToQuery = [
+  { apiVersion: "stu3", resourceType: "Patient" },
+  { apiVersion: "stu3", resourceType: "Coverage" },
+  { apiVersion: "stu3", resourceType: "ExplanationOfBenefit" },
+  { apiVersion: "stu3", resourceType: "ReferralRequest" },
+  { apiVersion: "dstu2", resourceType: "Patient" },
+  { apiVersion: "dstu2", resourceType: "Encounter" },
+  { apiVersion: "dstu2", resourceType: "Observation" },
+  { apiVersion: "dstu2", resourceType: "MedicationOrder" },
+  { apiVersion: "stu3", resourceType: "MedicationDispense" },
+  { apiVersion: "stu3", resourceType: "MedicationStatement" },
+  { apiVersion: "stu3", resourceType: "MedicationOrder" },
+  { apiVersion: "dstu2", resourceType: "Condition" },
+  { apiVersion: "dstu2", resourceType: "AllergyIntolerance" }
+];
+
+function getAllFhirResourceBundles(oneupAccessToken, callback) {
+  let responseData = {};
+  async.map(
+    endpointsToQuery,
+    function(params, callback) {
+      getFhirResourceBundle(
+        params.apiVersion,
+        params.resourceType,
+        oneupAccessToken,
+        function(error, body) {
+          if (error) {
+            callback(error);
+          } else {
+            try {
+              let jsbody = JSON.parse(body);
+              if (typeof responseData[params.resourceType] === "undefined") {
+                responseData[params.resourceType] = jsbody;
+              } else {
+                responseData[params.resourceType].entry = responseData[
+                  params.resourceType
+                ].entry.concat(jsbody.entry);
+              }
+              callback(null, jsbody);
+            } catch (e) {
+              console.log("error in getFhirResourceBundle", e);
+            }
+          }
+        }
+      );
+    },
+    function(error, body) {
+      if (error) {
+        callback(error);
+      } else {
+        callback(responseData);
+      }
+    }
+  );
+}
+
+export {
+  accessTokenCache,
+  getOrMakeOneUpUserId,
+  getFhirResourceBundle,
+  getAllFhirResourceBundles,
+  getTokenFromAuthCode,
+  getAuthCodeForExistingUser,
+  getOneUpUserId
+};

@@ -1,0 +1,14 @@
+type User {
+  id: ID
+  email: String!
+  oneUpId: String
+}
+
+type Query {
+  user: [User]
+  dupa: [User]
+}
+
+type Mutation {
+  createUser(email: String!): User
+}
